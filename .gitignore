@@ -1,0 +1,22 @@
+# Secrets and local settings: never commit these
+.env
+*.key
+.clasprc.json
+credentials*.json
+token*.json
+
+# Exports that may contain personal data
+*.xlsx
+*.csv
+exports/
+handoff/
+*Handoff*.md
+*HANDOFF*.md
+
+# System files
+.DS_Store
+node_modules/
+
+# Private Apps Script settings (Sheet ID, company lists) and clasp's link to the live project
+apps-script/Config.gs
+.clasp.json
