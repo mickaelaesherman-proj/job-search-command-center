@@ -239,7 +239,7 @@ const K = (p) => ({ ANTHROPIC_API_KEY: 'sk-test-abcd1234', ...p });
   check('already-scored role untouched', o.get(8, 5).v === 4 && o.get(8, 6).v === 'old');
   check('unreadable posting marked, no score', /^Not scored: posting text unavailable \(not a Greenhouse, Lever or Ashby link\)/.test(o.get(9, 6).v) && o.get(9, 5).v === '');
   const p = w.apiCalls[0];
-  check('prompt uses tool and model', p.model === 'claude-sonnet-5-5' && p.tool_choice.name === 'record_fit_score');
+  check('prompt offers the tool without forcing it (auto) and names the model', p.model === 'claude-sonnet-5-5' && p.tool_choice.type === 'auto' && p.tools[0].name === 'record_fit_score' && /calling the record_fit_score tool exactly once/.test(p.messages[0].content), p.tool_choice);
   check('prompt carries profile, rubric, injection warning', /Gaps to weigh/.test(p.system) && /Gate 5/.test(p.system) && /untrusted data/.test(p.system));
   check('prompt contains posting text (decoded)', /Jira & Agile/.test(p.messages[0].content));
   check('prompt never contains her ratings', !/YOUR FIT|Main reason for your rating/.test(JSON.stringify(p)));
@@ -316,6 +316,44 @@ const K = (p) => ({ ANTHROPIC_API_KEY: 'sk-test-abcd1234', ...p });
   Object.assign(w2.props, K({ ANTHROPIC_WORKSPACE_ID: ' wrkspc_123 ' }));
   w2.env.aiScheduledScore();
   check('workspace header sent when the property is set', w2.apiHeaders[0]['anthropic-workspace-id'] === 'wrkspc_123', w2.apiHeaders[0]);
+}
+
+/* ================== 5c. Today's failure: unsupported tool_choice, breaker, text fallback ================== */
+{
+  const bad = { getResponseCode: () => 400, getContentText: () => JSON.stringify({ error: { message: 'tool_choice: type "tool" and "any" are not supported for this model.' } }) };
+  const ss = buildWorld();
+  const w = makeEnv(ss, router(() => [3, 3, 3, 3, 3, 3], { api: () => bad }));
+  Object.assign(w.props, K());
+  w.env.aiScheduledDraw();
+  check('batch draw stops after 3 identical errors (not 170)', w.apiCalls.length === 3, w.apiCalls.length);
+  check('stop is explained once, plainly', /Stopped after the same error 3 times in a row/.test(w.mails[0].body) && (w.mails[0].body.match(/^Error:/gm) || []).length === 3, w.mails[0].body);
+  check('no-batch message says nothing was charged and how to retry', /Nothing was charged for failed requests/.test(w.mails[0].body) && /Draw this week's blind batch now/.test(w.mails[0].body));
+  check('no batch written, nothing sealed', w.env.aisFindBatches_(ss.getSheetByName('AI Eval Set')).length === 0 && !Object.keys(w.props).some(k => /^AIS_SEAL_/.test(k)));
+  check('last-draw date not advanced, so the retry sees the same postings', !w.props['AIS_LAST_DRAW']);
+
+  const ss2 = buildWorld({ openRows: [1, 2, 3, 4, 5].map(i => ['x', 'Co' + i, 'PM', 'https://job-boards.greenhouse.io/c' + i + '/jobs/' + i, '', '', '', '', '', '', '']) });
+  const w2 = makeEnv(ss2, router(() => [3, 3, 3, 3, 3, 3], { api: () => bad }));
+  Object.assign(w2.props, K());
+  w2.env.aiScheduledScore();
+  check('Open Roles scoring also stops after 3 identical errors', w2.apiCalls.length === 3, w2.apiCalls.length);
+
+  // different errors do not trip the breaker; a success resets it
+  let n = 0;
+  const flaky = (k) => { n++; return (k % 2 === 1) ? { getResponseCode: () => 400, getContentText: () => JSON.stringify({ error: { message: 'odd error ' + k } }) } : null; };
+  const ss3 = buildWorld({ openRows: [1, 2, 3, 4, 5].map(i => ['x', 'Co' + i, 'PM', 'https://job-boards.greenhouse.io/c' + i + '/jobs/' + i, '', '', '', '', '', '', '']) });
+  const w3 = makeEnv(ss3, router(() => [4, 4, 4, 4, 4, 4], { api: flaky }));
+  Object.assign(w3.props, K());
+  w3.env.aiScheduledScore();
+  check('varied or intermittent errors do not stop the run', w3.apiCalls.length === 5, w3.apiCalls.length);
+
+  // model answers in text with JSON instead of calling the tool
+  const ss4 = buildWorld({ openRows: [['x', 'TextCo', 'PM', 'https://job-boards.greenhouse.io/t/jobs/9', '', '', '', '', '', '', '']] });
+  const json = { scope: 5, scope_reason: 'r', skills: 4, skills_reason: 'r', level: 3, level_reason: 'r', depth: 5, depth_reason: 'r', trajectory: 5, trajectory_reason: 'r', passion: 4, passion_reason: 'r', years_asked: '5+', top_concern: 'level', confidence: 'High', confidence_reason: 'full posting' };
+  const textAns = { getResponseCode: () => 200, getContentText: () => JSON.stringify({ content: [{ type: 'text', text: 'Here are the scores:\n```json\n' + JSON.stringify(json) + '\n```' }], usage: { input_tokens: 5000, output_tokens: 600 } }) };
+  const w4 = makeEnv(ss4, router(() => [1, 1, 1, 1, 1, 1], { api: () => textAns }));
+  Object.assign(w4.props, K());
+  w4.env.aiScheduledScore();
+  check('text-with-JSON answer is still scored correctly', ss4.getSheetByName('Open Roles').get(6, 5).v === 4, ss4.getSheetByName('Open Roles').get(6, 5).v);
 }
 
 /* ================== 6. Blind batch draw ================== */
