@@ -6,7 +6,7 @@ Accuracy is measured **only** on blind tests: the person rates postings without 
 
 ## Protocol
 
-1. Every Monday the script draws up to 10 postings the scan found that did **not** reach Open Roles (about 7 Tier 1-2 titles and 3 others, at most 3 per company, with a logged random seed so the draw is reproducible).
+1. Every Monday the script draws up to 10 postings the scan found that did **not** reach Open Roles (about 7 Tier 1-2 titles and 3 others, at most 2 per company (3 before 10/19/2026), with a logged random seed so the draw is reproducible).
 2. Each posting is scored through the Claude API. The prompt contains only the posting text, the candidate profile and the rubric.
 3. Scores are **sealed**: stored outside the Sheet, with only a fingerprint (SHA-256) shown. Any change to a sealed score is detected at reveal.
 4. She rates each posting 1-5 with a main reason.
