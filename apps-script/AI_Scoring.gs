@@ -38,7 +38,7 @@ var AIS = {
   TIME_LIMIT_MS: 270000,     // stop starting new work after 4.5 minutes (Apps Script limit is 6)
   BATCH_SIZE: 10,
   BATCH_TOP_TIER: 7,         // Tier 1 and 2 titles per batch; the rest come from Tier 3 / Other
-  BATCH_COMPANY_CAP: 3,
+  BATCH_COMPANY_CAP: 2,              // at most 2 postings per company in a batch (was 3 until 10/19/2026)
   BATCH_WINDOW_DAYS: 7,      // first batch looks back this far; later batches look back to the previous draw
   ELIGIBLE_ROUTING: ['Skipped', 'Watch'],
   MAX_POSTING_CHARS: 20000,  // posting text sent to the AI
