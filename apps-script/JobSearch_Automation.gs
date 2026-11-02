@@ -56,7 +56,10 @@ const CFG = {
   SENIOR_REGEX: /\b(director|vp|vice president|head of|chief|principal|staff|distinguished)\b/i,
 
   PAY_FLOOR: 115000,
-  YEARS_BAND_MAX: { 'TPM / Program': 5, 'Product': 3, 'Project': 5, 'Operations': 5, 'Other': 5 },
+  // Experience ranges live on the Criteria tab ("Role tracks..." table, column "Exp max (yrs)"), the single source
+  // of truth that the Sheet formulas also read. These values are a FALLBACK, used only if that table can't be read,
+  // and the scan email reports it under PROBLEMS whenever they are used. (CL-005, 10/30/2026)
+  YEARS_BAND_MAX: { 'TPM / Program': 5, 'Product': 4, 'Project': 5, 'Operations': 5, 'AI Safety / Research Generalist': 2, 'Other': 5 },
   DEFAULTS: { maxAgeApply: 10, hardCutoff: 21 }       // used only if the Criteria tab can't be read
 };
 
@@ -142,6 +145,7 @@ function runScan() {
   };
   try {
     const rules = readRules_();
+    (rules.warnings || []).forEach(function (w) { s.errors.push(w); });   // never hide a rules problem
     const tz = Session.getScriptTimeZone();
     s.dateLabel = Utilities.formatDate(new Date(), tz, 'EEE M/d');
     const registryAll = readRegistry_();
@@ -274,7 +278,7 @@ function readRegistry_() {
 
 function readRules_() {
   const sh = ss_().getSheetByName(CFG.SHEET_CRITERIA);
-  const rows = sh.getRange(1, 1, 30, 2).getValues();
+  const rows = sh.getRange(1, 1, 30, 6).getValues();
   const find = function (prefix) {
     for (let i = 0; i < rows.length; i++) {
       if (String(rows[i][0]).toLowerCase().indexOf(prefix) === 0) return rows[i][1];
@@ -282,11 +286,51 @@ function readRules_() {
     return null;
   };
   const asOf = find('as-of date');
+  const ranges = readYearsMax_(rows);
   return {
     asOf: asOf instanceof Date ? asOf : new Date(),
     maxAge: Number(find('max posting age')) || CFG.DEFAULTS.maxAgeApply,
-    hardCutoff: Number(find('hard cutoff')) || CFG.DEFAULTS.hardCutoff
+    hardCutoff: Number(find('hard cutoff')) || CFG.DEFAULTS.hardCutoff,
+    yearsMax: ranges.yearsMax,
+    warnings: ranges.warnings
   };
+}
+
+// Reads the top of each track's experience range from the Criteria tab's track table (header "Track", column
+// "Exp max (yrs)"). Never fails silently: any track it can't read falls back to CFG.YEARS_BAND_MAX AND is reported.
+// "Other" titles use the Operations range, the same fallback the Open Roles Experience Check formula uses.
+// Also reports the Criteria tab's range check line if it says the rubric text and the table disagree.
+function readYearsMax_(rows) {
+  const warnings = [];
+  const yearsMax = {};
+  let header = -1, col = -1;
+  for (let i = 0; i < rows.length && header < 0; i++) {
+    if (String(rows[i][0]).trim().toLowerCase() === 'track') {
+      header = i;
+      col = rows[i].map(function (h) { return String(h).trim().toLowerCase(); }).indexOf('exp max (yrs)');
+    }
+  }
+  if (header >= 0 && col > 0) {
+    for (let i = header + 1; i < rows.length; i++) {
+      const name = String(rows[i][0]).trim();
+      const v = rows[i][col];
+      if (name === '' || v === '' || v === null || isNaN(Number(v))) break;     // end of the table
+      yearsMax[name] = Number(v);
+    }
+  }
+  const required = ['TPM / Program', 'Product', 'Operations', 'Project'];
+  const missing = required.filter(function (t) { return !(t in yearsMax); });
+  if (header < 0 || col <= 0) warnings.push('Experience ranges: the Criteria track table (header "Track", column "Exp max (yrs)") was not found, so built-in fallback ranges were used. Check the Criteria tab.');
+  else if (missing.length) warnings.push('Experience ranges: no "Exp max (yrs)" value on the Criteria tab for ' + missing.join(', ') + ', so built-in fallback ranges were used for them.');
+  Object.keys(CFG.YEARS_BAND_MAX).forEach(function (t) {
+    if (t === 'Other' || t in yearsMax) return;
+    yearsMax[t] = CFG.YEARS_BAND_MAX[t];
+  });
+  yearsMax['Other'] = yearsMax['Operations'];
+  rows.forEach(function (r) {
+    if (String(r[0]).trim().toUpperCase().indexOf('MISMATCH') === 0) warnings.push('Criteria range check: ' + String(r[0]).trim());
+  });
+  return { yearsMax: yearsMax, warnings: warnings };
 }
 
 // The "memory": which jobs have we already logged? (first-seen tracking)
@@ -446,7 +490,7 @@ function routeJob_(job, rules, repostSuspect, size) {
   if (job.payMax === null) { minor.push('pay not listed'); penalty += 1; }
   else if (job.payMax < CFG.PAY_FLOOR) { review.push('posted pay ceiling $' + fmtMoney_(job.payMax) + ' is below your floor'); penalty += 2; }
   if (minYears === null) { minor.push('years of experience not stated'); penalty += 1; }
-  else if (minYears > CFG.YEARS_BAND_MAX[track]) { review.push('asks for ' + minYears + '+ years, above your ' + track + ' band'); penalty += 2; }
+  else if (minYears > yearsMaxFor_(rules, track)) { review.push('asks for ' + minYears + '+ years, above your ' + track + ' band'); penalty += 2; }
   if (CFG.SENIOR_REGEX.test(job.title)) { minor.push('senior-level title'); penalty += 1; }
   if (tier === 'Other') { minor.push('title is not one of your Tier 1 to 3 titles'); penalty += 1; }
   const rating = Math.max(1, 5 - penalty);
@@ -487,6 +531,13 @@ function routeJob_(job, rules, repostSuspect, size) {
     arrangement: loc.arrangement, ageDays: ageDays,
     skipCategories: skip.map(function (x) { return x[0]; })
   };
+}
+
+// The top of the experience range for a track, from the Criteria tab (read by readRules_), else the fallback.
+function yearsMaxFor_(rules, track) {
+  const m = (rules && rules.yearsMax) || {};
+  if (track in m) return m[track];
+  return track in CFG.YEARS_BAND_MAX ? CFG.YEARS_BAND_MAX[track] : CFG.YEARS_BAND_MAX['Other'];
 }
 
 function trackOf_(title) {
