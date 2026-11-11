@@ -20,3 +20,4 @@ node_modules/
 # Private Apps Script settings (Sheet ID, company lists) and clasp's link to the live project
 apps-script/Config.gs
 .clasp.json
+tests/PRIVATE_*

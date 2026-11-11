@@ -25,7 +25,7 @@ class Sheet {
     setValues(a) { a.forEach((row, i) => row.forEach((v, j) => { sh.log.push({ r: r + i, c: c + j, v: v }); sh.put(r + i, c + j, v); })); }
   }; }
 }
-function makeWorld() {
+function makeWorld(extraRows, extraEmails) {
   const tracker = new Sheet('Job Tracker', 1), tab = new Sheet('Email Scan Review', 8104);
   const trHead = ['Company', 'Title', 'Application Date', 'Entry Type', 'Channel', 'Reference Link', 'Website', 'Additional Notes'];
   trHead.forEach((h, i) => tracker.put(1, i + 1, h));
@@ -39,6 +39,7 @@ function makeWorld() {
   T(8, 'Gamma', 'Product Owner, Reservations', daysAgo(19), 'Application');
   T(9, 'Kelvo', 'Product Operations Manager', daysAgo(40), 'Application');
   T(10, 'Spark', 'Technical Product Manager', daysAgo(6), 'Application');
+  (extraRows || []).forEach(x => T(...x));
   const heads = ['Tracker row', 'Company', 'Role in your tracker', 'Applied', 'First response date', 'Response type', 'Confidence', 'Email subject (shortened)', 'Current First Response Date', 'Action', 'Notes', 'YOUR DECISION', 'Decision date (auto)', 'Days since applied', 'What happens', 'Latest email date', 'Latest email type', 'Writes: First Response Date', 'Writes: Last Updated', 'Writes: Outcome', 'Email link', 'Review status'];
   heads.forEach((h, i) => tab.put(4, i + 1, h));
   const R = (row, trackerRow, e, f, dec, g, j) => { tab.put(row, 1, trackerRow); tab.put(row, 5, e === undefined ? '' : e); tab.put(row, 6, f); tab.put(row, 7, g || ''); tab.put(row, 10, j || ''); tab.put(row, 12, dec || ''); };
@@ -65,7 +66,7 @@ function makeWorld() {
     ['m8', daysAgo(1), 'Me <me@example.com>', 'Re: Brightly', 'Unfortunately I am not moving forward with this.'],
     ['m9', daysAgo(4), 'Tool Barn Careers <careers@toolbarn.com>', 'An update from The Tool Barn', 'We have decided to move forward with other candidates for your application.'],
     ['m10', daysAgo(2), 'Glassdoor <info@glassdoor.com>', 'Unfortunately you missed this', 'Unfortunately jobs are closing']
-  ].map(x => msg(...x));
+  ].concat(extraEmails || []).map(x => msg(...x));
 
   const threads = emails.map((m, i) => ({ getId: () => 'T' + i, _m: m }));
   const ctx = vm.createContext({
@@ -107,6 +108,15 @@ const COL = { A: 1, E: 5, F: 6, G: 7, H: 8, J: 10, K: 11, L: 12, P: 16, Q: 17, U
   check('preview: Gmail query excludes sent mail and job-alert senders', /-in:sent/.test(w.ctx._lastQuery) && /glassdoor\.com/.test(w.ctx._lastQuery) && /newer_than:14d/.test(w.ctx._lastQuery), w.ctx._lastQuery);
 }
 
+
+// CL-007 criterion 8: the 60-day preview looks back 60 days and changes nothing
+{
+  const w8 = makeWorld();
+  run(w8, 'previewEmailCheck60Days');
+  check('60-day preview: writes nothing and saves no memory', w8.tab.log.length === 0 && Object.keys(w8.props).length === 0, JSON.stringify(w8.tab.log.slice(0, 3)));
+  check('60-day preview: Gmail query looks back 60 days', /newer_than:60d/.test(w8.ctx._lastQuery), w8.ctx._lastQuery);
+  check('60-day preview: one summary labelled PREVIEW', w8.mails.length === 1 && /^\[PREVIEW\]/.test(w8.mails[0].subject), w8.mails[0] && w8.mails[0].subject);
+}
 // ============ 2. REAL RUN ============
 const w = makeWorld();
 run(w, 'checkEmailNow');
@@ -166,6 +176,75 @@ check('2nd scheduled run: stays quiet when there is nothing new', w.mails.length
   check('label: Friday 9 AM -> same day', lab('2026-10-16T09:00:00-04:00', 1) === 'Friday 10/16 around 5 PM', lab('2026-10-16T09:00:00-04:00', 1));
   check('label: Friday 6 PM -> next Friday', lab('2026-10-16T18:00:00-04:00', 1) === 'Friday 10/23 around 5 PM', lab('2026-10-16T18:00:00-04:00', 1));
   check('label: not installed -> empty (email says it is not scheduled)', lab('2026-10-13T16:00:00-04:00', 0) === '');
+}
+
+// ============ 6. CL-007 end to end: nothing a company sends you is dropped silently ============
+{
+  const w6 = makeWorld(
+    [[11, 'Quillon', 'Product Manager', daysAgo(20), 'Application'],
+     [12, 'Norvale', 'Program Manager', daysAgo(15), 'Application'],
+     [13, 'Pallas', 'Product Operations Manager', daysAgo(25), 'Application'],
+     [14, 'Corvid', 'Product Manager', daysAgo(18), 'Application'],
+     [15, 'Ledgerly', 'Technical Program Manager', daysAgo(22), 'Application']],
+    [['c1', daysAgo(2), 'Quillon <careers@quillon.example>', 'A note from Quillon', 'Hi Jordan, there is an update on your candidacy for the Product Manager role. Please log in to the candidate portal to see it.'],
+     ['c2', daysAgo(1), 'Norvale <people@norvale.example>', 'Your offer from Norvale', 'Hi Jordan, we are delighted to extend you an offer for the Program Manager role. We would like to schedule a call to walk through the details.'],
+     ['c3', daysAgo(3), 'Pallas <no-reply@ashbyhq.com>', 'Pallas application update', 'Hi Jordan, we received a high volume of strong applicants for the Product Operations Manager role.'],
+     ['c4', daysAgo(2), 'Corvid <no-reply@us.greenhouse-mail.io>', 'Corvid Application Follow-Up', 'Thank you for applying for the Product Manager role at Corvid. At this time, we won\u2019t be moving forward with your application.'],
+     ['c5', daysAgo(2), 'Weekly Digest <news@digest.example>', 'This week in product', 'Ledgerly launched a new feature this week. Read more inside.']]);
+  run(w6, 'checkEmailNow');
+  const rowOf = (trackerRow) => { for (let r = 5; r <= 40; r++) if (cellAt(w6, r, COL.A) === trackerRow) return r; return 0; };
+  const rq = rowOf(11), rn = rowOf(12), rp = rowOf(13), rc = rowOf(14), rl = rowOf(15);
+  const b6 = w6.mails[0].body, s6 = w6.mails[0].subject;
+  check("CL-007 sim: unreadable email from Quillon (company in sender) -> Couldn't tell, Low, Review", rq && cellAt(w6, rq, COL.F) === "Couldn't tell" && cellAt(w6, rq, COL.G) === 'Low' && cellAt(w6, rq, COL.J) === 'Review', [rq, cellAt(w6, rq, COL.F), cellAt(w6, rq, COL.G), cellAt(w6, rq, COL.J)].join('|'));
+  check("CL-007 sim: Quillon row is no longer 'No email found', so the Sheet stops it from auto-ghosting", rq && cellAt(w6, rq, COL.F) !== 'No email found');
+  check("CL-007 sim: Quillon is in the summary under NEEDS YOUR DECISION as couldn't tell", /NEEDS YOUR DECISION[\s\S]*- Quillon[^\n]*couldn't tell what this email means/.test(b6), b6);
+  // Action 'Fill' only means "fill the first response date once you approve"; existing next-steps rows get it too (see the Brevity check).
+  // Never auto-approved is shown by where the offer is listed in the summary.
+  check('CL-007 sim: Norvale offer -> Offer, High, listed under NEEDS YOUR DECISION (never auto-approved)', rn && cellAt(w6, rn, COL.F) === 'Offer' && cellAt(w6, rn, COL.G) === 'High' && /NEEDS YOUR DECISION[\s\S]*- Norvale/.test(b6) && !/- Norvale/.test(b6.split('NEEDS YOUR DECISION')[0]), [rn, cellAt(w6, rn, COL.F), cellAt(w6, rn, COL.G), cellAt(w6, rn, COL.J)].join('|'));
+  check('CL-007 sim: an offer puts [OFFER] in the summary subject and "OFFER email" in its line', /\[OFFER\]/.test(s6) && /- Norvale[^\n]*OFFER email/.test(b6), s6);
+  check('CL-007 sim: Norvale offer is not listed as auto-approved', !/AUTO-APPROVED[^\n]*\n(- [^\n]*\n)*- Norvale/.test(b6.split('NEEDS YOUR DECISION')[0] || ''), b6);
+  check("CL-007 sim: Pallas hint phrase alone -> Couldn't tell (not a Rejection)", rp && cellAt(w6, rp, COL.F) === "Couldn't tell", [rp, cellAt(w6, rp, COL.F)].join('|'));
+  check("CL-007 sim: Corvid \"won't be moving forward\" -> Rejection, High, auto-approved", rc && cellAt(w6, rc, COL.F) === 'Rejection' && cellAt(w6, rc, COL.G) === 'High' && cellAt(w6, rc, COL.J) === 'Fill' && /AUTO-APPROVED[\s\S]*Corvid[\s\S]*NEEDS YOUR DECISION/.test(b6), [rc, cellAt(w6, rc, COL.F), cellAt(w6, rc, COL.G), cellAt(w6, rc, COL.J)].join('|'));
+  // Ledgerly is a new tracker row, so it is added as an automatic row and named on the existing "ADDED ... automatic rows" line;
+  // the newsletter itself must not change the row or appear anywhere else in the summary.
+  const b6noAdded = b6.split('\n').filter(l => !/^ADDED /.test(l)).join('\n');
+  check('CL-007 sim: a newsletter that only mentions Ledgerly in its text changes nothing and is not reported', rl && cellAt(w6, rl, COL.F) === 'No email found' && !/Ledgerly|This week in product/.test(b6noAdded), [rl, rl && cellAt(w6, rl, COL.F)].join('|'));
+  const before6 = w6.tab.log.length, mails6 = w6.mails.length;
+  run(w6, 'runEmailCheck');
+  check('CL-007 sim: a second run writes nothing new and stays quiet', w6.tab.log.length === before6 && w6.mails.length === mails6, JSON.stringify(w6.tab.log.slice(before6)));
+}
+
+// ============ 7. CL-009 end to end: alerts, account notices and quoted history raise nothing ============
+{
+  const w9 = makeWorld(
+    [[11, 'Quillon', 'Operations Manager', daysAgo(20), 'Application']],
+    [['n1', daysAgo(2), 'LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>', 'Operations Manager at Quillon', 'Quillon Operations Manager: About the role. The Operations Manager owns the day-to-day.'],
+     ['n2', daysAgo(3), 'Indeed <donotreply@match.indeed.com>', 'Project Manager @ Quillon', 'Your background could be a strong match for this Project Manager role at Quillon.'],
+     ['n3', daysAgo(1), 'Quillon <no-reply@quillon.example>', 'You shared some account data with an app', 'You gave an app access to some of your Quillon account data. You can review this access at any time.'],
+     ['n4', daysAgo(1), 'Dana at Apexly <dana@apexly.example>', 'RE: Program Manager at Charterly', "Hi Jordan,\n\nThanks for connecting today! Please reply with your updated resume.\n\nDana\n\nOn Thu, Oct 22, 2026 at 5:04 PM Jordan Lee <jordan@example.com> wrote:\n\n> Since I've already been submitted, I understand I can\u2019t move forward with your submission.\n"],
+     ['n5', daysAgo(1), 'LinkedIn <invitations@linkedin.com>', 'I want to connect', "Hi Jordan, I'd like to connect with you on LinkedIn."]]);
+  run(w9, 'checkEmailNow');
+  let rq9 = 0; for (let r = 5; r <= 40; r++) if (cellAt(w9, r, COL.A) === 11) rq9 = r;
+  const b9 = w9.mails.length ? w9.mails[0].body : '';
+  const b9noAdded = b9.split('\n').filter(l => !/^ADDED /.test(l)).join('\n');
+  check('CL-009 sim: Quillon row stays "No email found" (alert, Indeed match and account notice raise nothing)', rq9 && cellAt(w9, rq9, COL.F) === 'No email found', [rq9, rq9 && cellAt(w9, rq9, COL.F)].join('|'));
+  check('CL-009 sim: none of the noise appears in the summary', !/Quillon|Operations Manager at|account data|I want to connect/.test(b9noAdded), b9noAdded.slice(0, 400));
+  check('CL-009 sim: the agency reply quoting my own words is not listed as a Rejection', !/Apexly[^\n]*Rejection/.test(b9) && !/Charterly[^\n]*Rejection/.test(b9), b9noAdded.slice(0, 400));
+}
+
+// ============ 8. CL-009 Option B: job boards that also carry application updates ============
+{
+  const wb = makeWorld(
+    [[11, 'Quillon', 'Program Manager', daysAgo(40), 'Application']],
+    [['b1', daysAgo(3), 'Wellfound <team@hi.wellfound.com>', 'An update from Quillon', 'Log in - Get help. An update about your application. Your applications to the following companies have expired. We expire applications to motivate companies to process them more quickly.'],
+     ['b2', daysAgo(2), 'Wellfound <team@hi.wellfound.com>', 'New job: Program Manager at Quillon, and 2 more matches - Wellfound', "Hi Jordan! I've found 3 new jobs matching your alert preferences."],
+     ['b3', daysAgo(1), 'Welcome to the Jungle <contact@welcometothejungle.com>', 'Create your password', 'Hello! All you have to do is create your password to securely access your candidate space.']]);
+  run(wb, 'checkEmailNow');
+  let rb = 0; for (let r = 5; r <= 40; r++) if (cellAt(wb, r, COL.A) === 11) rb = r;
+  const bb = wb.mails.length ? wb.mails[0].body : '';
+  check("CL-009 sim: a Wellfound application update (company in subject) reaches you as Couldn't tell", rb && cellAt(wb, rb, COL.F) === "Couldn't tell" && /- Quillon[^\n]*couldn't tell/.test(bb), [rb, rb && cellAt(wb, rb, COL.F)].join('|'));
+  check('CL-009 sim: a Wellfound job alert ("New job: ...") is ignored', !/New job: Program Manager/.test(bb), bb.slice(0, 300));
+  check('CL-009 sim: a Welcome to the Jungle account email is ignored', !/Create your password/.test(bb), bb.slice(0, 300));
 }
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed ? 1 : 0);

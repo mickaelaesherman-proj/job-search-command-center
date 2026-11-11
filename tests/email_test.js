@@ -44,12 +44,12 @@ const REJ = [
 ];
 REJ.forEach(([n, s, b]) => { const c = emClassify_(s, b); check('REJECTION ' + n, c.type === 'Rejection', JSON.stringify(c)); });
 
-// soft rejections: must be Rejection, but only Medium confidence
+// hint-only emails: expected result changed from Rejection (Medium) to Couldn't tell by CL-008 (see the Change Log)
 [
  ['Pick-n-Go (snip)', 'Careers at Pick-n-Go', "Jordan, Thank you for the interest you have expressed in the Sr. Technical Program Lead, Customer Technology Solutions role at Pick-n-Go. We have received an overwhelming response for this position"],
  ['Taskora (snip)', 'Taskora Candidacy Update - Senior Technical Delivery Lead', "Hi Jordan, We would like to first start off by saying thank you for your interest in Taskora! The Senior Technical Delivery Lead had an overwhelming response and we have received multiple qualified"],
  ['Harbor (snip)', 'Thank you for your interest in Product Operations Manager at Harbor', "Hi Jordan, Thank you for your interest in Harbor! We received many applicants for the Product Operations Manager role, which is the greatest feedback an organization could receive."]
-].forEach(([n, s, b]) => { const c = emClassify_(s, b); check('SOFT-REJECTION ' + n, c.type === 'Rejection' && c.conf === 'Medium', JSON.stringify(c)); });
+].forEach(([n, s, b]) => { const c = emClassify_(s, b); check("HINT-ONLY is Couldn't tell (CL-008) " + n, c.type === "Couldn't tell" && c.conf === 'Low', JSON.stringify(c)); });
 
 // next steps
 [
@@ -191,6 +191,127 @@ check('ACTION Medium -> Review whatever the date', emActionFor_('Medium', null, 
   check('Gamma (two applications, title-only) is Medium, so it is never auto-approved', r.status === 'ok' && r.conf === 'Medium' && !emAutoApprove_('Rejection', r.conf, 'Review', true), JSON.stringify({ c: r.conf })); }
 { const r = emMatch_(E('2026-10-08T04:50:17Z', 'The Tool Barn', 'toolbarn@myworkday.com', 'Thank You for Your Interest in The Tool Barn', 'Thank you for applying for the Product Manager , Req481927 position'), apps);
   check('Tool Barn (two applications, requisition match) is High and qualifies', r.status === 'ok' && r.conf === 'High' && emAutoApprove_('Rejection', r.conf, 'Fill', true)); }
+
+
+// =====================================================================================================
+// CL-007 (11/9/2026): contractions, hint rule, offers, no silent drops. FICTIONAL copies of real emails:
+// the tricky wording is kept exactly; names are changed. The real emails are tested in
+// tests/PRIVATE_real_emails_test.js, which .gitignore keeps off GitHub.
+// =====================================================================================================
+const UNCLEAR = "Couldn't tell";
+const isType = (c, t, conf) => c.type === t && (!conf || c.conf === conf);
+
+// Criterion 1 (fictional copies of the two missed rejections; curly apostrophes kept on purpose)
+{ const c = emClassify_('Pickwell Application Follow-Up', "Hi Jordan,\n\nThank you so much for taking the time to apply for the Product Manager II - Rewards and Promotions role at Pickwell. We really appreciate your interest and the effort you put into your application.\n\nWe received a high volume of strong applicants for this position, and it was a tough decision. At this time, we won\u2019t be moving forward with your application.\n\nWe\u2019ll keep your information on file and may reach out if another opportunity opens up that feels like a better match.\n\nIn the meantime, we\u2019d love to stay connected.");
+  check('CL-007 c1 Pickwell missed rejection is now Rejection High', isType(c, 'Rejection', 'High'), JSON.stringify(c)); }
+{ const c = emClassify_('Jordan Lee & Curling Forks\u2014Regarding your application', "Hi Jordan,\n\nWe\u2019ve carefully reviewed your application and are sorry to inform you that we won\u2019t be moving forward with it this time.\n\nWe\u2019re thankful for the time and effort you dedicated to the application process.");
+  check('CL-007 c1 Curling Forks missed rejection is now Rejection High', isType(c, 'Rejection', 'High'), JSON.stringify(c)); }
+
+// Criterion 2: every rejection rule that uses "not" reads each "n't" form the same way (straight and curly apostrophes)
+const NT = ["won't", "don't", "can't", "isn't", "wasn't", "weren't", "haven't", "aren't"];
+const RULES = [
+  ['not moving forward', (neg) => `We ${neg} be moving forward with your application.`],
+  ['decided not to proceed', (neg) => `We have decided ${neg} to proceed with your application.`],
+  ['not selected', (neg) => `You ${neg} been selected for this role.`],
+  ['not a match', (neg) => `Your background ${neg} quite aligned with this role.`]
+];
+RULES.forEach(([rule, make]) => {
+  const base = emClassify_('Update', make('not'));
+  check('CL-007 c2 "' + rule + '" with "not" is a Rejection', isType(base, 'Rejection', 'High'), JSON.stringify(base));
+  NT.forEach((neg) => [neg, neg.replace("'", '\u2019')].forEach((form) => {
+    const c = emClassify_('Update', make(form));
+    check('CL-007 c2 "' + rule + '" with "' + form + '" reads like "not"', c.type === base.type && c.conf === base.conf, JSON.stringify(c));
+  }));
+});
+{ const c = emClassify_('Update', 'Your application will not be progressed further at this time.');
+  check('CL-007 "will not be progressed" is a Rejection', isType(c, 'Rejection', 'High'), JSON.stringify(c)); }
+
+// Criterion 3: the hint rule
+[
+  ['hint + rejection wording -> Rejection', 'Update', 'We received a high volume of applicants. Unfortunately, we will not be moving forward.', 'Rejection'],
+  ['hint + next-steps wording -> Next steps', 'Update', "We received a large number of applications, and we'd like to schedule a call with you.", 'Next steps'],
+  ['hint + offer wording -> Offer', 'Update', 'We received an overwhelming response, and we are delighted to extend you an offer.', 'Offer'],
+  ['hint + "received your application" -> Received', 'Application received', "We've received your application. With a high volume of applications, it may take a while.", 'Received'],
+  ['hint + still-pending wording -> Received', 'Team update', "We've also received a large number of applications, so it may take us longer than usual to get back to you.", 'Received'],
+  ['hint alone -> Couldn\'t tell', 'Update', 'We received a high volume of strong applicants for this position.', UNCLEAR],
+  ['"we have received" a hint is not a receipt -> Couldn\'t tell', 'Update', 'We have received an overwhelming response for this position.', UNCLEAR]
+].forEach(([n, subj, body, want]) => { const c = emClassify_(subj, body); check('CL-007 c3 ' + n, c.type === want, JSON.stringify(c)); });
+
+// Criterion 4: offers
+[
+  ['formal offer', 'Your offer from Nimbus', 'We are pleased to extend to you an offer for the Program Manager role.'],
+  ['offer letter', 'Next steps', 'Please find your offer letter attached. Let us know if you have any questions.'],
+  ['verbal offer', 'Great news', 'Following our conversation, I am happy to confirm a verbal offer for the role.'],
+  ['offer plus a call to discuss it', 'Great news', "We're thrilled to make you an offer! We'd like to schedule a call to walk through the details."]
+].forEach(([n, subj, body]) => { const c = emClassify_(subj, body); check('CL-007 c4 OFFER ' + n, isType(c, 'Offer', 'High'), JSON.stringify(c)); });
+check('CL-007 c4 an Offer is never auto-approved', emAutoApprove_('Offer', 'High', 'Fill', true) === false);
+check("CL-007 c5 Couldn't tell is never auto-approved", emAutoApprove_(UNCLEAR, 'Low', 'Review', true) === false);
+[
+  ['benefits marketing', 'Life at Nimbus', "We're excited to offer flexible work and great benefits to everyone on our team."],
+  ['confirmation mentioning offers', 'Thanks for applying', 'Thank you for applying. We offer competitive pay and benefits.']
+].forEach(([n, subj, body]) => { const c = emClassify_(subj, body); check('CL-007 c4 NOT an offer: ' + n, c.type !== 'Offer', JSON.stringify(c)); });
+{ const c = emClassify_('Update', 'We regret to inform you that we are not moving forward. We would love to extend an offer for a future role.');
+  check('CL-007 c4 rejection plus offer wording is mixed (Low)', c.mixed === true && c.conf === 'Low', JSON.stringify(c)); }
+
+// Next steps that were missed before
+[
+  ['meet the team', 'Next round', "We'd like to have you meet the team for a final round."],
+  ['final round', 'Interview update', 'You have been invited to a final round with the hiring panel next week.']
+].forEach(([n, subj, body]) => { const c = emClassify_(subj, body); check('CL-007 NEXT-STEPS ' + n, c.type === 'Next steps', JSON.stringify(c)); });
+
+// Criterion 5: the matcher says whether the company was in the sender or subject (only then can "Couldn't tell" be raised)
+{ const r = emMatch_(E('2026-10-01T12:00:00Z', 'Brightly Hiring Team', 'no-reply@ashbyhq.com', 'A note from us', 'Hello there.'), apps);
+  check('CL-007 c5 company in the sender -> strong', r.status === 'ok' && r.strong === true, JSON.stringify(r)); }
+{ const r = emMatch_(E('2026-10-01T12:00:00Z', 'Weekly Digest', 'news@digest.example', 'This week in product', 'A story about Brightly and others.'), apps);
+  check('CL-007 c5 company only in the text -> not strong (newsletters cannot raise a flag)', r.status === 'ok' && r.strong === false, JSON.stringify(r)); }
+{ const r = emMatch_(E('2026-10-01T12:00:00Z', 'Ribbon Recruiting', 'no-reply@ribbon.com', 'A note from Ribbon', 'Hello.'), apps);
+  check('CL-007 c5 two applications, company in the sender -> ambiguous and strong', r.status === 'ambiguous' && r.strong === true, JSON.stringify(r)); }
+check('CL-007 one-time passcode subjects are ignored as noise', api.EM.NOISE_SUBJECT.test('Jordan Lee & Curling Forks\u2014OTP code') && api.EM.NOISE_SUBJECT.test('Your one-time passcode'));
+
+// Criterion 6: fictional copies of four real confirmations stay confirmations (never a decision, never Couldn't tell)
+[
+  ['Pickwell confirmation (Greenhouse)', 'Thanks for Applying \u2013 Stay Tuned!', "Hi Jordan,\n\nThanks for your interest in Pickwell!\n\nWe\u2019re excited you applied for the Product Manager II - Rewards and Promotions role and appreciate you taking the time to throw your hat in the ring.\n\nYour application will be reviewed by a real human (no robots here). If your background looks like a match, a recruiter will reach out in the next couple of weeks to set up an intro chat. We\u2019ll walk you through the process, share what to expect from interviews, and answer any questions you have about the role or life at Pickwell.\n\nIf we don\u2019t end up moving forward, it\u2019s not a reflection of your talent; sometimes it\u2019s just about timing or team fit.\n\nThanks again, we\u2019re glad to have you in the mix!"],
+  ['Meshnet confirmation (Greenhouse)', "We've received your Program Manager, EPD Operations application for Meshnet!", "Hi Jordan,\n\nThanks so much for applying for the Program Manager, EPD Operations position at Meshnet!\n\nWe\u2019ve received your application and are excited about your interest in joining us. We want to find the right people to join our growing team, and with a high volume of applications, it may take us a bit longer to share an update. Our goal is to personally review each and every application.\n\nWe move candidates through our hiring process on a continuous basis, which means that you don't have to wait around for a specific date or deadline before hearing back from us. This also means that we usually have candidates in different stages of the hiring process for each role. If there are any updates on the status of this role, we'll let you know in a timely manner.\n\nThis email confirms that we've received your application, and we'll be in touch if we feel it\u2019s a good match. While it may not always be possible, we do our best to get back to every candidate, even if it means making the difficult decision to say \"not right now\" or \"not for this role\"."],
+  ['Taskflow confirmation (Ashby)', 'Taskflow: Thanks for applying \u2014 here\u2019s what\u2019s next!', "Hi Jordan,\n\nThis is our friendly bot confirming we received your application for the Technical Program Manager role at Taskflow.\n\nThanks for applying! While we do receive a large number of applications every day, we commit to having a real human review your application and respond within 7-14 days.\n\nWe also want to set the expectation now that, should you advance in our interview process, you should come prepared to talk about how you use AI in your work today. The strongest candidates can point to specific workflows they've built.\n\nTo get hands-on before your interviews, here are a few places to start.\n\nTalk soon!"],
+  ['Tempo team-away notice (Ashby)', 'Tempo team away October 19 to 23', "Hi Jordan,\n\nWe hope you\u2019re doing well, and thanks for your continued interest in joining Tempo. We wanted to let you know that our team will be away on a retreat from October 19 to 23, and our hiring process will be on hold that week.\n\nWe\u2019ve also received a large number of applications, so it may take us longer than usual to get back to you. We\u2019ll aim to be in touch about next steps in the weeks after the retreat."]
+].forEach(([n, subj, body]) => { const c = emClassify_(subj, body); check('CL-007 c6 stays a confirmation: ' + n, c.type === 'Received' || c.type === 'Other', JSON.stringify(c)); });
+
+// Criterion 7: one email from each applicant tracking system, classified AND matched (fictional companies)
+const atsApps = [A(201, 'Pickwell', 'Product Manager', '2026-09-08'), A(202, 'Tempo', 'Generalist (Special Projects)', '2026-09-30'), A(203, 'Horizon AI', 'Product Manager, Website', '2026-10-05')];
+[
+  ['Greenhouse', E('2026-10-22T21:34:48Z', '', 'no-reply@us.greenhouse-mail.io', 'Pickwell Application Follow-Up', 'Thank you so much for taking the time to apply for the Product Manager II - Rewards and Promotions role at Pickwell. At this time, we won\u2019t be moving forward with your application.'), 201, 'Rejection'],
+  ['Ashby', E('2026-11-09T19:48:26Z', 'Tempo Hiring Team', 'no-reply@ashbyhq.com', 'Tempo Application Update', "Thank you for applying for the Generalist (Special Projects) role at Tempo. After reviewing your application, we've decided not to move forward with your candidacy. We wish you the best in your next steps!"), 202, 'Rejection'],
+  ['Lever', E('2026-10-20T12:00:00Z', 'Horizon AI', 'no-reply@hire.lever.co', 'Horizon AI: interview for Product Manager, Website', "Thank you for applying for the Product Manager, Website role. We'd like to schedule a 30-minute call with you."), 203, 'Next steps']
+].forEach(([ats, em, row, type]) => {
+  const c = emClassify_(em.subject, em.body), r = emMatch_(em, atsApps);
+  check('CL-007 c7 ' + ats + ' email is ' + type + ' and matches row ' + row, c.type === type && r.status === 'ok' && r.app.rowNum === row, JSON.stringify({ c: c.type, s: r.status, row: r.app && r.app.rowNum }));
+});
+
+
+// =====================================================================================================
+// CL-009 (11/10/2026): quoted history is not classified; noise senders; "Couldn't tell" needs application wording.
+// =====================================================================================================
+{ const { emStripQuoted_, emHasAppContext_ } = (function () { const m2 = src.match(/const EM = \{[\s\S]*?\n\};[\s\S]*?\/\/ END EMAIL-CHECK PURE/); return new Function(TEST_CONFIG + '\n' + m2[0] + '\n; return { emStripQuoted_, emHasAppContext_ };')(); })();
+  const gmailQuote = "Hi Jordan,\n\nThanks for connecting today! I copied my colleague on this email. If you can reply to all with your updated resume, I would appreciate it.\n\nThanks, and talk soon!\nDana\n\nOn Thu, Oct 22, 2026 at 5:04 PM Jordan Lee <jordan@example.com> wrote:\n\n> Hi Dana,\n> Since I've already been submitted for the requisition, I understand I can\u2019t move forward with your submission.\n";
+  const outlookQuote = "Hi Jordan,\n\nThanks for connecting today! Please send your updated resume.\n\nDana\n\nFrom: Jordan Lee <jordan@example.com>\nSent: Thursday, October 22, 2026 5:04 PM\nTo: Dana <dana@apexly.example>\nSubject: Re: Program Manager\n\nHi Dana, I understand I can\u2019t move forward with your submission since I was already submitted.";
+  const original = "Hi Jordan,\n\nThanks for the update.\n\n-----Original Message-----\nUnfortunately, we will not be moving forward.";
+  check('CL-009 Gmail-style quoted reply: my own quoted words are not read as a Rejection', emClassify_('RE: Program Manager at Charterly', gmailQuote).type !== 'Rejection', JSON.stringify(emClassify_('RE: Program Manager at Charterly', gmailQuote)));
+  check('CL-009 Outlook-style quoted reply (From/Sent/To) is not read as a Rejection', emClassify_('RE: Program Manager', outlookQuote).type !== 'Rejection', JSON.stringify(emClassify_('RE: Program Manager', outlookQuote)));
+  check('CL-009 "-----Original Message-----" quote is not read as a Rejection', emClassify_('RE: update', original).type !== 'Rejection');
+  check('CL-009 a rejection written ABOVE the quote is still a Rejection (High)', (function () { const c = emClassify_('RE: your application', 'Hi Jordan,\n\nUnfortunately, we will not be moving forward with your application.\n\nOn Mon, Nov 2, 2026 at 9:00 AM Jordan Lee wrote:\n> Thanks for the interview!'); return c.type === 'Rejection' && c.conf === 'High'; })());
+  check('CL-009 a body with no quote markers is unchanged', emStripQuoted_('Hello there.\nNothing quoted here.') === 'Hello there.\nNothing quoted here.');
+  check('CL-009 "From:" in ordinary text (no Sent/Date/To after it) does not cut the email', emStripQuoted_('Hi Jordan,\nFrom: our whole team, congratulations!\nWe are delighted to extend you an offer.').indexOf('extend you an offer') > 0);
+  [
+    ['Google-style account notice', 'You shared some account data with an app', 'You gave an app access to some of your account data. You can review this access at any time.', false],
+    ['consumer marketing', 'Big savings this week', 'Shop our weekend deals on tools and garden supplies.', false],
+    ['job alert naming the company', 'Operations Manager at Quillon', 'Quillon Operations Manager: About the role. The Operations Manager owns the day-to-day.', false],
+    ['portal update about the candidacy', 'A note from Quillon', 'There is an update on your candidacy. Please log in to the candidate portal.', true],
+    ['recruiter note', 'Quick question', 'Hi Jordan, I am the recruiter for the Program Manager role and wanted to ask about your availability.', true],
+    ['application status', 'Update', 'Your application status has changed. Log in to view it.', true]
+  ].forEach(([n, subj, body, want]) => check('CL-009 application wording: ' + n + ' -> ' + want, emHasAppContext_(subj, body) === want));
+  ['jobalerts-noreply@linkedin.com', 'jobs-noreply@linkedin.com', 'invitations@linkedin.com', 'match.indeed.com', 'accounts.google.com']
+    .forEach((x) => check('CL-009 noise sender listed: ' + x, api.EM.NOISE_SENDERS.indexOf(x) >= 0));
+}
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
