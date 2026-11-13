@@ -8,6 +8,7 @@ token*.json
 # Exports that may contain personal data
 *.xlsx
 *.csv
+!docs/change-log.csv
 exports/
 handoff/
 *Handoff*.md
@@ -20,4 +21,4 @@ node_modules/
 # Private Apps Script settings (Sheet ID, company lists) and clasp's link to the live project
 apps-script/Config.gs
 .clasp.json
-tests/PRIVATE_*
+PRIVATE_*
