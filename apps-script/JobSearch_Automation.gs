@@ -56,7 +56,10 @@ const CFG = {
   SENIOR_REGEX: /\b(director|vp|vice president|head of|chief|principal|staff|distinguished)\b/i,
 
   PAY_FLOOR: 115000,
-  YEARS_BAND_MAX: { 'TPM / Program': 5, 'Product': 3, 'Project': 5, 'Operations': 5, 'Other': 5 },
+  // Experience ranges live on the Criteria tab ("Role tracks..." table, column "Exp max (yrs)"), the single source
+  // of truth that the Sheet formulas also read. These values are a FALLBACK, used only if that table can't be read,
+  // and the scan email reports it under PROBLEMS whenever they are used. (CL-005, 10/30/2026)
+  YEARS_BAND_MAX: { 'TPM / Program': 5, 'Product': 4, 'Project': 5, 'Operations': 5, 'AI Safety / Research Generalist': 2, 'Other': 5 },
   DEFAULTS: { maxAgeApply: 10, hardCutoff: 21 }       // used only if the Criteria tab can't be read
 };
 
@@ -82,6 +85,7 @@ function onOpen() {
     .addItem('Preview email check (changes nothing)', 'previewEmailCheck')
     .addItem('Check email for replies now', 'checkEmailNow')
     .addItem('Check email, look back 60 days', 'checkEmailLast60Days')
+    .addItem('Preview email check, look back 60 days (changes nothing)', 'previewEmailCheck60Days')
     .addSeparator()
     .addItem('Preview weekly snapshot email', 'previewWeeklySnapshot')
     .addItem('Install Friday 5 PM snapshot', 'installWeeklySnapshot')
@@ -142,6 +146,7 @@ function runScan() {
   };
   try {
     const rules = readRules_();
+    (rules.warnings || []).forEach(function (w) { s.errors.push(w); });   // never hide a rules problem
     const tz = Session.getScriptTimeZone();
     s.dateLabel = Utilities.formatDate(new Date(), tz, 'EEE M/d');
     const registryAll = readRegistry_();
@@ -274,7 +279,7 @@ function readRegistry_() {
 
 function readRules_() {
   const sh = ss_().getSheetByName(CFG.SHEET_CRITERIA);
-  const rows = sh.getRange(1, 1, 30, 2).getValues();
+  const rows = sh.getRange(1, 1, 30, 6).getValues();
   const find = function (prefix) {
     for (let i = 0; i < rows.length; i++) {
       if (String(rows[i][0]).toLowerCase().indexOf(prefix) === 0) return rows[i][1];
@@ -282,11 +287,51 @@ function readRules_() {
     return null;
   };
   const asOf = find('as-of date');
+  const ranges = readYearsMax_(rows);
   return {
     asOf: asOf instanceof Date ? asOf : new Date(),
     maxAge: Number(find('max posting age')) || CFG.DEFAULTS.maxAgeApply,
-    hardCutoff: Number(find('hard cutoff')) || CFG.DEFAULTS.hardCutoff
+    hardCutoff: Number(find('hard cutoff')) || CFG.DEFAULTS.hardCutoff,
+    yearsMax: ranges.yearsMax,
+    warnings: ranges.warnings
   };
+}
+
+// Reads the top of each track's experience range from the Criteria tab's track table (header "Track", column
+// "Exp max (yrs)"). Never fails silently: any track it can't read falls back to CFG.YEARS_BAND_MAX AND is reported.
+// "Other" titles use the Operations range, the same fallback the Open Roles Experience Check formula uses.
+// Also reports the Criteria tab's range check line if it says the rubric text and the table disagree.
+function readYearsMax_(rows) {
+  const warnings = [];
+  const yearsMax = {};
+  let header = -1, col = -1;
+  for (let i = 0; i < rows.length && header < 0; i++) {
+    if (String(rows[i][0]).trim().toLowerCase() === 'track') {
+      header = i;
+      col = rows[i].map(function (h) { return String(h).trim().toLowerCase(); }).indexOf('exp max (yrs)');
+    }
+  }
+  if (header >= 0 && col > 0) {
+    for (let i = header + 1; i < rows.length; i++) {
+      const name = String(rows[i][0]).trim();
+      const v = rows[i][col];
+      if (name === '' || v === '' || v === null || isNaN(Number(v))) break;     // end of the table
+      yearsMax[name] = Number(v);
+    }
+  }
+  const required = ['TPM / Program', 'Product', 'Operations', 'Project'];
+  const missing = required.filter(function (t) { return !(t in yearsMax); });
+  if (header < 0 || col <= 0) warnings.push('Experience ranges: the Criteria track table (header "Track", column "Exp max (yrs)") was not found, so built-in fallback ranges were used. Check the Criteria tab.');
+  else if (missing.length) warnings.push('Experience ranges: no "Exp max (yrs)" value on the Criteria tab for ' + missing.join(', ') + ', so built-in fallback ranges were used for them.');
+  Object.keys(CFG.YEARS_BAND_MAX).forEach(function (t) {
+    if (t === 'Other' || t in yearsMax) return;
+    yearsMax[t] = CFG.YEARS_BAND_MAX[t];
+  });
+  yearsMax['Other'] = yearsMax['Operations'];
+  rows.forEach(function (r) {
+    if (String(r[0]).trim().toUpperCase().indexOf('MISMATCH') === 0) warnings.push('Criteria range check: ' + String(r[0]).trim());
+  });
+  return { yearsMax: yearsMax, warnings: warnings };
 }
 
 // The "memory": which jobs have we already logged? (first-seen tracking)
@@ -446,7 +491,7 @@ function routeJob_(job, rules, repostSuspect, size) {
   if (job.payMax === null) { minor.push('pay not listed'); penalty += 1; }
   else if (job.payMax < CFG.PAY_FLOOR) { review.push('posted pay ceiling $' + fmtMoney_(job.payMax) + ' is below your floor'); penalty += 2; }
   if (minYears === null) { minor.push('years of experience not stated'); penalty += 1; }
-  else if (minYears > CFG.YEARS_BAND_MAX[track]) { review.push('asks for ' + minYears + '+ years, above your ' + track + ' band'); penalty += 2; }
+  else if (minYears > yearsMaxFor_(rules, track)) { review.push('asks for ' + minYears + '+ years, above your ' + track + ' band'); penalty += 2; }
   if (CFG.SENIOR_REGEX.test(job.title)) { minor.push('senior-level title'); penalty += 1; }
   if (tier === 'Other') { minor.push('title is not one of your Tier 1 to 3 titles'); penalty += 1; }
   const rating = Math.max(1, 5 - penalty);
@@ -487,6 +532,13 @@ function routeJob_(job, rules, repostSuspect, size) {
     arrangement: loc.arrangement, ageDays: ageDays,
     skipCategories: skip.map(function (x) { return x[0]; })
   };
+}
+
+// The top of the experience range for a track, from the Criteria tab (read by readRules_), else the fallback.
+function yearsMaxFor_(rules, track) {
+  const m = (rules && rules.yearsMax) || {};
+  if (track in m) return m[track];
+  return track in CFG.YEARS_BAND_MAX ? CFG.YEARS_BAND_MAX[track] : CFG.YEARS_BAND_MAX['Other'];
 }
 
 function trackOf_(title) {
@@ -803,8 +855,12 @@ const EM = {
   LOOKBACK_DAYS: 14, BACKFILL_DAYS: 60,
   MAX_THREADS: 300, BODY_CHARS: 2500, MAX_RUN_MS: 4.5 * 60 * 1000,
   // Job-alert and newsletter senders: ignored completely.
-  NOISE_SENDERS: ['glassdoor.com', 'ziprecruiter.com', 'remotehunter.com', 'theladders.com', 'wellfound.com', 'indeedemail.com', 'calendar-notification@google.com'],
-  NOISE_SUBJECT: /\bnew jobs?\b|jobs? (similar|for you|you may)|job alert|recommended (jobs|for you)|talent community|newsletter|security code|verify your|confirm your email|password/i,
+  NOISE_SENDERS: ['glassdoor.com', 'ziprecruiter.com', 'remotehunter.com', 'theladders.com', 'indeedemail.com', 'calendar-notification@google.com',
+    // CL-009: Wellfound is NOT blocked as a whole sender: it also sends real application updates. Its alerts
+    // ('New job: ...') are caught by NOISE_SUBJECT. Welcome to the Jungle is treated the same way.
+    // CL-009: job alerts and account notices that name companies you applied to
+    'jobalerts-noreply@linkedin.com', 'jobs-noreply@linkedin.com', 'invitations@linkedin.com', 'match.indeed.com', 'accounts.google.com'],
+  NOISE_SUBJECT: /\bnew jobs?\b|jobs? (similar|for you|you may)|job alert|recommended (jobs|for you)|talent community|newsletter|security code|\botp\b|one[- ]time (pass)?code|verification code|verify your|confirm your email|password/i,
   // Company names that are also ordinary words: only trusted when they appear in the sender or subject.
   // Your real list is PRIVATE_CONFIG.genericCompanyNames in Config.gs; this default is used only without one.
   GENERIC_NAMES: [],
@@ -820,24 +876,37 @@ const EM_COND_START = /^\s*(if|should|once|unless|in the event|in case|provided 
 const EM_DISCLAIMER = /(not be able to|unable to|cannot|can't|won't be able to)\s+(respond|reply|contact|get back|follow up|provide feedback)/;
 const EM_REJ_EXPLICIT = [
   ['unfortunately', /\bunfortunately\b/],
-  ['not moving forward', /\b(not|n't)\s+(be\s+)?(moving|move|proceeding|proceed|advancing|advance|progressing|progress|going\s+to\s+(move|proceed|advance))\b/],
-  ['decided not to proceed', /\bnot\s+to\s+(proceed|move|advance|continue|pursue)\b/],
+  ['not moving forward', /(?:\bnot|n't)\s+(be\s+)?(moving|move|proceeding|proceed|advancing|advance|progressing|progressed|progress|going\s+to\s+(move|proceed|advance))\b/],
+  ['decided not to proceed', /(?:\bnot|n't)\s+to\s+(proceed|move|advance|continue|pursue)\b/],
   ['other candidates', /\b(other|another)\s+(qualified\s+)?(candidates?|applicants?)\b/],
   ['role filled or search closed', /\b(position|role|job|opening|search|requisition)\b[^.]{0,40}\b(has|have|had|is|was)\s+(now\s+)?(been\s+)?(filled|closed)\b|\b(filled|closed)\s+(the|this|our)\b[^.]{0,40}\b(role|position|search|opening)\b/],
   ['no longer hiring or considering', /\bno\s+longer\s+(under\s+consideration|being\s+considered|hiring|accepting|available|interviewing|open|recruiting)\b/],
-  ['not selected', /\b(not|n't|weren't|wasn't|haven't\s+been)\s+(been\s+)?selected\b/],
+  ['not selected', /(?:\bnot|n't)\s+(been\s+)?selected\b/],
   ['regret to inform', /\bregret\s+to\s+inform\b|\bwe\s+regret\b/],
   ['hiring decision made', /\bhiring\s+decision\b/],
-  ['not a match', /\bnot\s+(quite\s+|ideally\s+|the\s+right\s+)?(aligned|a\s+(good\s+)?(match|fit)|suited)\b|\bisn't\s+quite\s+aligned\b/],
+  ['not a match', /(?:\bnot|n't)\s+(quite\s+|ideally\s+|the\s+right\s+)?(aligned|a\s+(good\s+)?(match|fit)|suited)\b/],
   ['going a different direction', /\b(going|moving|heading)\s+in\s+a\s+(different\s+)?direction\b/]
 ];
-const EM_REJ_SOFT = [
-  ['high volume of applicants', /\boverwhelming\s+(response|number|interest)\b|\breceived\s+(a\s+)?(large|high)\s+number\b|\breceived\s+(so\s+)?many\s+(qualified\s+)?(applicants?|applications?|responses?)\b|\bmultiple\s+qualified\b/]
+// HINT phrases (CL-007): 'high volume of applicants' appears in rejections AND in confirmations and delay notices,
+// so a hint never decides on its own. A confirming phrase decides; with none, the email is "Couldn't tell".
+const EM_HINT = [
+  ['high volume of applicants', /\boverwhelming\s+(response|number|interest)\b|\b(high|large)\s+(volume|number)\s+of\s+(strong\s+|qualified\s+)?(applicants?|applications?|candidates?|responses?)\b|\breceived\s+(a\s+)?(large|high)\s+number\b|\breceived\s+(so\s+)?many\s+(qualified\s+)?(applicants?|applications?|responses?)\b|\bmultiple\s+qualified\b/]
 ];
+// Confirming phrases for "still pending": a hint next to one of these is a status update, not a decision.
+const EM_PENDING = /\bmay\s+take\s+(us\s+)?(a\s+(bit|little)\s+)?longer\b|\blonger\s+than\s+usual\b|\b(be|get|getting)\s+(back\s+)?in\s+touch\b|\bget\s+back\s+to\s+(you|every)\b|\bon\s+hold\b|\brespond\s+within\b|\breview\s+(each|every|your)\s+(and\s+every\s+)?application\b/;
+// Offers (CL-007): never auto-approved; always come to you.
+const EM_OFFER = [
+  ['offer', /\b(pleased|happy|delighted|excited|thrilled)\s+to\s+(extend|offer|present)\s+(to\s+)?you\b|\b(pleased|happy|delighted|excited|thrilled)\s+to\s+(extend|make)\s+(you\s+)?an?\s+offer\b|\boffer\s+(letter|of\s+employment)\b|\bextend(ing)?\s+(you\s+)?(an?\s+)?(formal\s+|verbal\s+|written\s+)?offer\b|\bverbal\s+offer\b/, 'High']
+];
+// Strict receipt phrase for the hint rule: it must be YOUR APPLICATION that was received. The looser EM_RECEIVED
+// also accepts "we have received an overwhelming response", which is the hint itself, not a confirmation.
+const EM_RECEIVED_APP = /\b(received|got)\s+your\s+application\b|\byour\s+application\s+(has\s+been\s+|was\s+|is\s+)?(received|submitted)\b/;
+const EM_UNCLEAR = "Couldn't tell";
 const EM_NEXT = [
   ['asks to schedule a call or interview', /\b(schedule|scheduling|set\s+up|arrange|book|booking)\b[^.]{0,50}\b(call|interview|chat|conversation|meeting|screen|screening|intro|time|slot)\b/, 'High'],
   ['next step in the interview process', /\bnext\s+(step|stage|round)s?\s+(in|of)\s+(the\s+|our\s+)?(interview|hiring|selection|recruiting|recruitment)\s+process\b|\bmove\s+(you\s+)?(forward\s+)?to\s+the\s+next\s+(step|stage|round)\b|\bmove\s+to\s+the\s+next\s+step\b/, 'High'],
   ['invites you to talk', /\binvit(e|ing|ation)\s+you\s+to\s+(an?\s+)?(interview|call|chat|speak|meet|connect)\b|\b(would|love|d)\s+(like\s+)?to\s+(speak|talk|chat|connect|meet|learn\s+more\s+about\s+you|discuss)\b/, 'High'],
+  ['meet the team or a further round', /\b(meet|speak\s+with|talk\s+to)\s+(the|our)\s+(team|hiring\s+manager|panel)\b|\b(final|next|second|onsite|on-site)\s+round\b/, 'High'],
   ['phone or video screen', /\b(phone|video|recruiter|initial|intro|introductory)\s+(screen|screening|call|interview)\b/, 'High'],
   ['scheduling link or availability', /calendly\.com|goodtime\.io|cal\.com\/|\bpick\s+a\s+time\b|\bselect\s+a\s+time\b|\byour\s+availability\b/, 'Medium']
 ];
@@ -853,33 +922,63 @@ function emMinConf_(a, b) { return EM_RANK[a] <= EM_RANK[b] ? a : b; }
 
 // Decide what an email is. Sentences with "if / should / once / unless" are ignored for the
 // decision, because automatic confirmations are full of "if you are not selected..." lines.
+// CL-009: cut a reply at the start of its quoted history, so the classifier never reads earlier messages
+// (including your own words). Markers: "On ... wrote:", an Outlook "From:" header followed by Sent/Date/To,
+// "-----Original Message-----", and the first line starting with ">".
+function emStripQuoted_(body) {
+  const b = String(body || '');
+  const marks = [
+    /^[ \t]*On\b[^\n]{0,200}\bwrote:[ \t]*$/m,
+    /^[ \t]*-{2,}[ \t]*Original Message[ \t]*-{2,}/mi,
+    /^[ \t]*From:[^\n]*\n(?:[^\n]*\n){0,2}?[ \t]*(Sent|Date|To):/m,
+    /^[ \t]*>/m
+  ];
+  let cut = b.length;
+  marks.forEach(function (re) { const m = re.exec(b); if (m && m.index < cut) cut = m.index; });
+  return b.substring(0, cut);
+}
+
+// CL-009: "Couldn't tell" is raised only when an unreadable email is about an application.
+const EM_APP_CONTEXT = /\byour\s+(job\s+)?application\b|\bapplication\s+(for|to|status|update)\b|\bcandidacy\b|\bapplied\b|\bapplying\b|\binterview|\brecruit(er|ers|ing|ment)\b|\bhiring\s+(team|manager|process)\b|\btalent\s+acquisition\b/;
+function emHasAppContext_(subject, body) {
+  const text = (String(subject || '') + '. ' + emStripQuoted_(body).substring(0, EM.BODY_CHARS)).replace(/[\u2018\u2019]/g, "'").toLowerCase();
+  return EM_APP_CONTEXT.test(text);
+}
+
 function emClassify_(subject, body) {
-  const text = (String(subject || '') + '. ' + String(body || '').substring(0, EM.BODY_CHARS)).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').toLowerCase();
-  const hits = { rej: [], soft: [], next: [] };
+  const text = (String(subject || '') + '. ' + emStripQuoted_(body).substring(0, EM.BODY_CHARS)).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').toLowerCase();
+  const hits = { rej: [], hint: [], next: [], offer: [] };
   text.split(/[.!?]+\s+/).forEach(function (sentence, pos) {
     if (EM_DISCLAIMER.test(sentence)) return;
     if (EM_COND_START.test(sentence)) return;                       // "If X, then Y": the whole sentence is conditional
     const live = sentence.split(/\s*(?:,|;|\bbut\b)\s*/).filter(function (c) { return !EM_CONDITIONAL.test(c); }).join(', ');
     if (!live) return;
     EM_REJ_EXPLICIT.forEach(function (p) { if (p[1].test(live)) hits.rej.push({ label: p[0], pos: pos }); });
-    EM_REJ_SOFT.forEach(function (p) { if (p[1].test(live)) hits.soft.push({ label: p[0], pos: pos }); });
+    EM_HINT.forEach(function (p) { if (p[1].test(live)) hits.hint.push({ label: p[0], pos: pos }); });
     EM_NEXT.forEach(function (p) { if (p[1].test(live)) hits.next.push({ label: p[0], pos: pos, conf: p[2] }); });
+    EM_OFFER.forEach(function (p) { if (p[1].test(live)) hits.offer.push({ label: p[0], pos: pos, conf: p[2] }); });
   });
-  const rej = hits.rej.concat(hits.soft), nx = hits.next;
-  if (rej.length && !nx.length) {
-    return { type: 'Rejection', conf: hits.rej.length ? 'High' : 'Medium', label: (hits.rej[0] || hits.soft[0]).label, mixed: false };
-  }
+  const rej = hits.rej, nx = hits.next, of = hits.offer;
+  // An offer outranks next steps (offer emails often ask to set up a call); an offer with rejection wording is mixed.
+  if (of.length && !rej.length) return { type: 'Offer', conf: 'High', label: of[0].label, mixed: false };
+  if (rej.length && !nx.length && !of.length) return { type: 'Rejection', conf: 'High', label: rej[0].label, mixed: false };
   if (nx.length && !rej.length) {
     const strong = nx.filter(function (n) { return n.conf === 'High'; });
     return { type: 'Next steps', conf: strong.length ? 'High' : 'Medium', label: (strong[0] || nx[0]).label, mixed: false };
   }
-  if (nx.length && rej.length) {
+  if (rej.length) {                                                   // rejection wording plus next-steps or offer wording
+    const other = nx.concat(of);
     const firstRej = Math.min.apply(null, rej.map(function (x) { return x.pos; }));
-    const firstNx = Math.min.apply(null, nx.map(function (x) { return x.pos; }));
-    const isRej = firstRej <= firstNx;
-    return { type: isRej ? 'Rejection' : 'Next steps', conf: 'Low', label: (isRej ? rej[0] : nx[0]).label, mixed: true };
+    const firstOther = Math.min.apply(null, other.map(function (x) { return x.pos; }));
+    const isRej = firstRej <= firstOther;
+    return { type: isRej ? 'Rejection' : (of.length ? 'Offer' : 'Next steps'), conf: 'Low', label: (isRej ? rej[0] : (of[0] || nx[0])).label, mixed: true };
   }
-  return { type: EM_RECEIVED.test(text) ? 'Received' : 'Other', conf: 'Low', label: '', mixed: false };
+  const received = EM_RECEIVED.test(text);
+  if (hits.hint.length) {                                             // a hint alone never decides (CL-007, criterion 3)
+    if (EM_RECEIVED_APP.test(text) || EM_PENDING.test(text)) return { type: 'Received', conf: 'Low', label: '', mixed: false };
+    return { type: EM_UNCLEAR, conf: 'Low', label: hits.hint[0].label + ' (no decision wording found)', mixed: false };
+  }
+  return { type: received ? 'Received' : 'Other', conf: 'Low', label: '', mixed: false };
 }
 
 // The auto-approve test. MIRRORED in the Email Scan Review formulas (columns O, R, S, T, V):
@@ -970,7 +1069,7 @@ function emMatch_(em, apps) {
     c.th = emTitleHits_(c.app.title, titleText);
   });
   const ok = function (c, conf, by) {
-    return { status: 'ok', app: c.app, how: c.how, by: by, conf: conf, titleSeen: c.th.hit >= 1 || c.reqHit };
+    return { status: 'ok', app: c.app, how: c.how, by: by, conf: conf, titleSeen: c.th.hit >= 1 || c.reqHit, strong: c.score === 2 };
   };
   if (pool.length === 1) {
     const c = pool[0];
@@ -983,7 +1082,7 @@ function emMatch_(em, apps) {
   if (best.th.hit >= 1 && (best.th.hit - second.th.hit >= 1 || best.th.frac - second.th.frac >= 0.25)) {
     return ok(best, 'Medium', 'role title (company has several applications)');
   }
-  return { status: 'ambiguous', cands: pool.map(function (c) { return c.app; }) };
+  return { status: 'ambiguous', cands: pool.map(function (c) { return c.app; }), strong: top === 2 };
 }
 // END EMAIL-CHECK PURE
 
@@ -1117,9 +1216,15 @@ function emailCheck_(opts) {
     const byApp = {};
     emails.forEach(function (em) {
       if (Date.now() - startedAt > EM.MAX_RUN_MS) { r.truncated = true; return; }
-      const cls = emClassify_(em.subject, em.body);
-      if (cls.type !== 'Rejection' && cls.type !== 'Next steps') { if (cls.type === 'Received') r.ignored++; return; }
+      let cls = emClassify_(em.subject, em.body);
+      if (cls.type === 'Received') { r.ignored++; return; }
       const m = emMatch_(em, apps);
+      if (cls.type === 'Other') {
+        // CL-007: an email the rules cannot read, from a company you applied to (named in the sender or subject),
+        // is never dropped. It becomes "Couldn't tell" and comes to you. Anything else unreadable is ignored as before.
+        if (!m.strong || !emHasAppContext_(em.subject, em.body)) { r.ignored++; return; }   // CL-009: must be about an application
+        cls = { type: EM_UNCLEAR, conf: 'Low', label: 'no decision wording the rules recognize', mixed: false };
+      }
       if (m.status === 'ok') {
         const it = { em: em, cls: cls, m: m, conf: emMinConf_(cls.conf, m.conf), app: m.app };
         (byApp[m.app.rowNum] = byApp[m.app.rowNum] || []).push(it);
@@ -1195,13 +1300,22 @@ function emailCheck_(opts) {
   return r;
 }
 
+// One plain phrase for why a finding needs you (CL-007 adds Offer and Couldn't tell).
+function emWhy_(it) {
+  if (it.cls.type === 'Offer') return 'OFFER email: read it now';
+  if (it.cls.type === EM_UNCLEAR) return "couldn't tell what this email means: please read it";
+  if (it.cls.type === 'Next steps') return 'next-steps email';
+  return it.conf + ' confidence';
+}
+
 function emSummary_(r) {
   const tz = emTz_(), label = Utilities.formatDate(new Date(), tz, 'EEE M/d');
   const autoItems = r.newReplies.filter(function (it) { return it.auto; });
   const needItems = r.newReplies.filter(function (it) { return !it.auto; });
   const nAuto = autoItems.length, need = needItems.length;
   const headline = (nAuto ? nAuto + ' auto-approved' : '') + (nAuto && need ? ', ' : '') + (need ? need + (need === 1 ? ' needs' : ' need') + ' your decision' : '');
-  const subject = (r.preview ? '[PREVIEW] ' : '') + (r.errors.length ? '[Needs attention] ' : '') +
+  const nOffer = needItems.filter(function (it) { return it.cls.type === 'Offer'; }).length;
+  const subject = (r.preview ? '[PREVIEW] ' : '') + (r.errors.length ? '[Needs attention] ' : '') + (nOffer ? '[OFFER] ' : '') +
     'Email check ' + label + ': ' + (headline || 'nothing new needs your decision');
   const when = function (d) { return Utilities.formatDate(d, tz, 'M/d h:mm a'); };
   const line = function (it) { return it.app.company + ': ' + it.app.title + ' | ' + it.cls.type + ' | ' + it.conf + ' confidence | ' + when(it.em.date) + ' | ' + it.em.link; };
@@ -1211,7 +1325,7 @@ function emSummary_(r) {
     autoItems.forEach(function (it) { T.push('- ' + line(it)); });
     T.push('  To undo one, pick any option in column L of that row (Pending Verification holds it).', '');
   }
-  if (need) { T.push((r.preview ? 'WOULD NEED YOUR DECISION' : 'NEEDS YOUR DECISION') + ' (Email Scan Review, orange in column V)'); needItems.forEach(function (it) { T.push('- ' + line(it) + ' | ' + (it.cls.type !== 'Rejection' ? 'next-steps email' : it.conf + ' confidence')); }); T.push(''); }
+  if (need) { T.push((r.preview ? 'WOULD NEED YOUR DECISION' : 'NEEDS YOUR DECISION') + ' (Email Scan Review, orange in column V)'); needItems.forEach(function (it) { T.push('- ' + line(it) + ' | ' + emWhy_(it)); }); T.push(''); }
   if (r.laterEmail.length) { T.push('NEWER EMAIL ON A ROW STILL WAITING FOR YOU'); r.laterEmail.forEach(function (it) { T.push('- ' + line(it)); }); T.push(''); }
   if (r.flagged.length) {
     T.push('NEW EMAIL ON AN APPLICATION YOU ALREADY DECIDED OR THAT WAS AUTO-APPROVED (that decision was not changed)');
@@ -1243,6 +1357,7 @@ function runEmailCheck() { emRun_({ days: EM.LOOKBACK_DAYS, preview: false, alwa
 function checkEmailNow() { emRun_({ days: EM.LOOKBACK_DAYS, preview: false, always: true }); }
 function checkEmailLast60Days() { emRun_({ days: EM.BACKFILL_DAYS, preview: false, always: true }); }
 function previewEmailCheck() { emRun_({ days: EM.LOOKBACK_DAYS, preview: true, always: true }); }
+function previewEmailCheck60Days() { emRun_({ days: EM.BACKFILL_DAYS, preview: true, always: true }); }   // CL-007 criterion 8
 
 function emRun_(opts) {
   const r = emailCheck_(opts);
